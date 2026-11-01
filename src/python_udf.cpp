@@ -476,6 +476,14 @@ static bool NumpyDeprecatesAccessToCore(const nb::tuple &numpy_version) {
 	return false;
 }
 
+// The catalog can outlive the wrapper that registered the function, including
+// when another binding owns the native connection.
+struct PythonScalarFunctionInfo : ScalarFunctionInfo {
+	explicit PythonScalarFunctionInfo(const nb::callable &udf) : owner(nb::borrow<nb::object>(udf)) {
+	}
+	PyObjectHolder owner;
+};
+
 struct PythonUDFData {
 public:
 	PythonUDFData(const string &name, bool vectorized, FunctionNullHandling null_handling,
@@ -637,6 +645,7 @@ public:
 		// A Python callable can raise, and casting its return value can fail, so a UDF is always
 		// fallible. Without this core rethrows any execution error as an InternalException.
 		scalar_function.SetFallible();
+		scalar_function.SetExtraFunctionInfo<PythonScalarFunctionInfo>(udf);
 		return scalar_function;
 	}
 };
