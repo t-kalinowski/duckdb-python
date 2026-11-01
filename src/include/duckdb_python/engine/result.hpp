@@ -21,6 +21,8 @@
 
 namespace duckdb {
 
+class SharedConnection;
+
 namespace engine {
 
 //! Runs between engine tasks of a blocking call and throws to abandon it
@@ -58,7 +60,8 @@ class ConnectionClaim;
 class Result : public enable_shared_from_this<Result> {
 public:
 	//! written_type is the submitted statement's own type, since the handle of a prepared execution reports EXECUTE
-	Result(unique_ptr<QueryResult> submitted, StatementType written_type, Format format);
+	Result(unique_ptr<QueryResult> submitted, StatementType written_type, Format format,
+	       std::shared_ptr<SharedConnection> shared = nullptr);
 	~Result();
 
 	Result(const Result &) = delete;
@@ -105,6 +108,9 @@ public:
 	shared_ptr<ClientContext> TryGetContext() const;
 	//! The database whose buffers hold the rows, null once it is gone. Weak for the same reason as the context.
 	shared_ptr<DatabaseInstance> TryGetDatabase() const;
+	const std::shared_ptr<SharedConnection> &Sharing() const {
+		return shared;
+	}
 	//! Keeps every row: drives the query to its end unless it already ended. A failure ends the query.
 	void Retain(const InterruptCheck &check);
 	//! Retain for a caller that already holds the connection's claim. A failure ends the query.
@@ -161,6 +167,7 @@ private:
 
 private:
 	unique_ptr<QueryResult> handle;
+	std::shared_ptr<SharedConnection> shared;
 	unique_ptr<ResultStreamBase> stream;
 	Format format;
 	atomic<State> state;

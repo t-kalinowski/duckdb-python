@@ -611,6 +611,7 @@ def connect(
     read_only: bool = False,
     config: dict[str, str | bool | int | float | lst[str]] | None = None,
 ) -> DuckDBPyConnection: ...
+def from_shared_connection(exported: dict[str, object]) -> DuckDBPyConnection: ...
 @typing.overload
 def create_function(
     name: str,

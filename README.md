@@ -45,3 +45,5 @@ pip install 'duckdb[all]'
 ## Contributing
 
 See the [CONTRIBUTING.md](CONTRIBUTING.md) for instructions on how to set up a development environment.
+
+See [Sharing a native connection](SHARED_CONNECTION.md) for importing a session from another DuckDB binding.

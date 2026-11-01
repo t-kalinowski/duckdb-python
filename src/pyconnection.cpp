@@ -471,7 +471,7 @@ std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::UnregisterUDF(const stri
 	auto &connection = con.GetConnection();
 	auto &context = *connection.context;
 	// Held from the check to the change, so no result can open in between and be ended by it
-	engine::ConnectionClaim claim(context);
+	engine::ConnectionClaim claim(context, con.Sharing());
 	engine::VerifyNoOpenResult(context);
 
 	context.RunFunctionInTransaction([&]() {
@@ -509,7 +509,7 @@ DuckDBPyConnection::RegisterScalarUDF(const string &name, const nb::callable &ud
 	auto &context = *connection.context;
 	// Held from the check to the change, so no result can open in between and be ended by it, and checked again
 	// because converting runs user code that can open a result
-	engine::ConnectionClaim claim(context);
+	engine::ConnectionClaim claim(context, con.Sharing());
 	engine::VerifyNoOpenResult(context);
 
 	if (context.transaction.HasActiveTransaction()) {
@@ -695,7 +695,7 @@ void DuckDBPyConnection::CheckSignals() {
 }
 
 engine::Session DuckDBPyConnection::EngineSession() {
-	return engine::Session(con.GetConnection().context);
+	return engine::Session(con.GetConnection().context, con.Sharing());
 }
 
 nb::list TransformNamedParameters(const case_insensitive_map_t<idx_t> &named_param_map, const nb::dict &params) {
@@ -1163,6 +1163,10 @@ void DuckDBPyConnection::Close() {
 	DUCKDB_PY_ASSERT_GIL_HELD();
 	// Released with the GIL held, since the registry entries they let go own Python references
 	ReleaseOwnedSources();
+	if (con.IsBorrowed()) {
+		auto shared = con.Sharing();
+		shared->Close();
+	}
 	// Taken out under the GIL, so a seam call reading the guard under the GIL sees all of it or a closed connection.
 	auto released = con.Release();
 	// Release the GIL only for the native Connection / DuckDB teardown, which
@@ -1251,7 +1255,7 @@ void DuckDBPyConnection::LoadExtension(const string &extension) {
 	ConnectionLockGuard conn_lock(*this);
 	auto &connection = con.GetConnection();
 	// Held from the check to the change, so no result can open in between and be ended by it
-	engine::ConnectionClaim claim(*connection.context);
+	engine::ConnectionClaim claim(*connection.context, con.Sharing());
 	engine::VerifyNoOpenResult(*connection.context);
 	const ExtensionLoadOptions extension_opts = {extension};
 	ExtensionHelper::LoadExternalExtension(*connection.context, extension_opts);
@@ -1374,7 +1378,10 @@ void DuckDBPyConnection::Cursors::ClearCursors() {
 std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::Cursor() {
 	auto res = std::make_shared<DuckDBPyConnection>();
 	res->con.SetDatabase(con);
-	res->con.SetConnection(make_uniq<Connection>(res->con.GetDatabase()));
+	res->con.SetConnection(make_uniq<Connection>(res->con.GetDatabase()), con.Sharing());
+	if (con.Sharing()) {
+		con.Sharing()->Track(res);
+	}
 	cursors.AddCursor(res);
 	return res;
 }
@@ -1581,6 +1588,33 @@ void InstantiateNewInstance(DuckDB &db) {
 	system_catalog.CreateFunction(transaction, map_info);
 	system_catalog.CreateFunction(transaction, scan_info);
 	RegisterPythonArrowScan(db_instance);
+}
+
+std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::FromSharedConnection(const nb::dict &exported) {
+	auto shared = SharedConnection::Import(exported);
+	auto &database = shared->GetDatabase();
+	auto &config = DBConfig::GetConfig(*database.instance);
+	bool python_ready = false;
+	for (auto &scan : config.replacement_scans.Snapshot()) {
+		if (scan->function == PythonReplacementScan::Replace) {
+			python_ready = true;
+			break;
+		}
+	}
+	if (!python_ready) {
+		config.AddExtensionOption("pandas_analyze_sample", "Rows sampled when analyzing a pandas object column",
+		                          LogicalType::UBIGINT, Value::UBIGINT(1000));
+		config.AddExtensionOption("python_enable_replacements", "Look up Python objects in the current stack",
+		                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+		config.AddExtensionOption("python_scan_all_frames", "Look up Python objects in all preceding frames",
+		                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
+		InstantiateNewInstance(database);
+		config.replacement_scans.emplace_back(PythonReplacementScan::Replace);
+	}
+	auto result = std::make_shared<DuckDBPyConnection>();
+	shared->Track(result);
+	result->con.SetSharedConnection(std::move(shared));
+	return result;
 }
 
 static std::shared_ptr<DuckDBPyConnection> FetchOrCreateInstance(const string &database_path, DBConfig &config) {

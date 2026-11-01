@@ -20,6 +20,7 @@
 #include "duckdb_python/pyfilesystem.hpp"
 #include "duckdb_python/registered_py_object.hpp"
 #include "duckdb_python/python_dependency.hpp"
+#include "duckdb_python/shared_connection.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb_python/nb/conversions/exception_handling_enum.hpp"
 #include "duckdb_python/nb/conversions/python_udf_type_enum.hpp"
@@ -111,18 +112,21 @@ public:
 
 public:
 	DuckDB &GetDatabase() {
+		CheckShared();
 		if (!database) {
 			ThrowConnectionException();
 		}
 		return *database;
 	}
 	const DuckDB &GetDatabase() const {
+		CheckShared();
 		if (!database) {
 			ThrowConnectionException();
 		}
 		return *database;
 	}
 	shared_ptr<DuckDB> ShareDatabase() const {
+		CheckShared();
 		if (!database) {
 			ThrowConnectionException();
 		}
@@ -135,22 +139,25 @@ public:
 	}
 	//! For the calls that must reach a connection whose query is running: interrupting it, reading its progress
 	Connection &GetConnectionWhileBusy() {
+		CheckShared();
 		if (!connection) {
 			ThrowConnectionException();
 		}
 		return *connection;
 	}
 	void ThrowIfBusy() const {
+		CheckShared();
 		if (state && connection) {
 			state->ThrowIfBusy(*connection->context);
 		}
 	}
 
 	bool ConnectionIsClosed() const {
-		return connection == nullptr;
+		return connection == nullptr || (shared_connection && shared_connection->IsClosed());
 	}
 	//! The client state of the open connection
 	engine::ConnectionState &GetState() {
+		CheckShared();
 		if (!connection || !state) {
 			ThrowConnectionException();
 		}
@@ -158,6 +165,7 @@ public:
 	}
 	//! The sources of the open connection's database, which every connection of it shares
 	engine::SourceRegistry &GetSources() {
+		CheckShared();
 		if (!connection || !sources) {
 			ThrowConnectionException();
 		}
@@ -172,12 +180,14 @@ public:
 		return *connection;
 	}
 	DbapiResult &GetResult() {
+		CheckShared();
 		if (!result) {
 			ThrowConnectionException();
 		}
 		return *result;
 	}
 	const DbapiResult &GetResult() const {
+		CheckShared();
 		if (!result) {
 			ThrowConnectionException();
 		}
@@ -194,16 +204,32 @@ public:
 		database = std::move(db);
 	}
 	void SetDatabase(ConnectionGuard &con) {
+		con.CheckShared();
 		if (!con.database) {
 			ThrowConnectionException();
 		}
 		database = con.database;
 	}
-	void SetConnection(unique_ptr<Connection> con) {
+	void SetConnection(unique_ptr<Connection> con, std::shared_ptr<SharedConnection> shared = nullptr) {
 		state = con ? engine::ConnectionState::Get(*con->context) : nullptr;
 		// Held, so reading the catalog version costs an atomic load and no lookup
 		sources = con ? engine::SourceRegistry::Get(*con->context) : nullptr;
-		connection = std::move(con);
+		owned_connection = std::move(con);
+		connection = owned_connection.get();
+		shared_connection = std::move(shared);
+	}
+	void SetSharedConnection(std::shared_ptr<SharedConnection> shared) {
+		connection = &shared->GetConnection();
+		state = engine::ConnectionState::Get(*connection->context);
+		sources = engine::SourceRegistry::Get(*connection->context);
+		database = shared_ptr<DuckDB>(std::shared_ptr<DuckDB>(shared, &shared->GetDatabase()));
+		shared_connection = std::move(shared);
+	}
+	const std::shared_ptr<SharedConnection> &Sharing() const {
+		return shared_connection;
+	}
+	bool IsBorrowed() const {
+		return shared_connection && !owned_connection;
 	}
 	//! What the guard owned, taken out in one step with the GIL held, so a call reading the guard under the GIL sees
 	//! either all of it or a closed connection; the caller destroys it, which can take long, without the GIL
@@ -212,6 +238,7 @@ public:
 		shared_ptr<engine::ConnectionState> state;
 		shared_ptr<engine::SourceRegistry> sources;
 		shared_ptr<DuckDB> database;
+		std::shared_ptr<SharedConnection> shared_connection;
 
 		//! The connection first, then the database it reads, as the guard's setters always did
 		void Destroy() {
@@ -219,14 +246,17 @@ public:
 			state.reset();
 			sources.reset();
 			database.reset();
+			shared_connection.reset();
 		}
 	};
 	Released Release() {
 		Released released;
-		released.connection = std::move(connection);
+		released.connection = std::move(owned_connection);
+		connection = nullptr;
 		released.state = std::move(state);
 		released.sources = std::move(sources);
 		released.database = std::move(database);
+		released.shared_connection = std::move(shared_connection);
 		return released;
 	}
 	void SetResult(std::unique_ptr<DbapiResult> res) {
@@ -237,13 +267,20 @@ public:
 	}
 
 private:
+	void CheckShared() const {
+		if (shared_connection) {
+			shared_connection->Check();
+		}
+	}
 	void ThrowConnectionException() const {
 		throw ConnectionException("Connection already closed!");
 	}
 
 private:
 	shared_ptr<DuckDB> database;
-	unique_ptr<Connection> connection;
+	unique_ptr<Connection> owned_connection;
+	Connection *connection = nullptr;
+	std::shared_ptr<SharedConnection> shared_connection;
 	shared_ptr<engine::ConnectionState> state;
 	shared_ptr<engine::SourceRegistry> sources;
 	std::unique_ptr<DbapiResult> result;
@@ -278,7 +315,9 @@ public:
 		explicit ConnectionLockGuard(DuckDBPyConnection &conn) : lock_(conn.py_connection_lock, std::defer_lock) {
 			DUCKDB_PY_ASSERT_GIL_HELD();
 			// The holder of the mutex may be running a query that is waiting for this very call
-			conn.con.ThrowIfBusy();
+			if (!conn.con.ConnectionIsClosed()) {
+				conn.con.ThrowIfBusy();
+			}
 			nb::gil_scoped_release release;
 			DUCKDB_PY_ASSERT_GIL_RELEASED();
 			lock_.lock();
@@ -454,6 +493,7 @@ public:
 
 	static std::shared_ptr<DuckDBPyConnection> Connect(const nb::object &database, bool read_only,
 	                                                   const nb::dict &config);
+	static std::shared_ptr<DuckDBPyConnection> FromSharedConnection(const nb::dict &exported);
 
 	static vector<Value> TransformPythonParamList(ClientContext &context, const nb::handle &params);
 	static identifier_map_t<BoundParameterData> TransformPythonParamDict(ClientContext &context,

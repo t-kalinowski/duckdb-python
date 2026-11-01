@@ -315,10 +315,10 @@ DuckDBPyAppender::DuckDBPyAppender(std::shared_ptr<DuckDBPyConnection> connectio
 
 // Checked before any lookup, so the refusal does not depend on whether a type name needed the transaction, and
 // again before the bind, because converting a name or a type can run Python code that aborts the transaction
-static void RefuseInsideAnAbortedTransaction(ClientContext &context) {
+static void RefuseInsideAnAbortedTransaction(ClientContext &context, const std::shared_ptr<SharedConnection> &shared) {
 	DUCKDB_PY_ASSERT_GIL_HELD();
 	nb::gil_scoped_release release;
-	engine::ConnectionClaim claim(context);
+	engine::ConnectionClaim claim(context, shared);
 	context.RunFunctionInTransaction([]() {}, true);
 }
 
@@ -334,10 +334,10 @@ std::unique_ptr<DuckDBPyAppender> DuckDBPyAppender::Create(std::shared_ptr<DuckD
                                                            shared_ptr<ClientContext> context, vector<Identifier> names,
                                                            vector<LogicalType> types, const string &source,
                                                            const string &dml) {
-	RefuseInsideAnAbortedTransaction(*context);
+	RefuseInsideAnAbortedTransaction(*context, connection->con.Sharing());
 	std::unique_ptr<DuckDBPyAppender> appender(
 	    new DuckDBPyAppender(std::move(connection), *context, std::move(names), std::move(types)));
-	engine::Session session(context);
+	engine::Session session(context, appender->connection->con.Sharing());
 	DUCKDB_PY_ASSERT_GIL_HELD();
 	nb::gil_scoped_release release;
 	appender->statement = FlushStatement(*context, *appender->buffer, appender->names, source, dml);
@@ -370,7 +370,7 @@ std::unique_ptr<DuckDBPyAppender> DuckDBPyAppender::ForTable(std::shared_ptr<Duc
                                                              const string &action_name,
                                                              const std::optional<nb::list> &key) {
 	Held held {connection->con.ShareDatabase(), connection->con.GetConnection().context};
-	RefuseInsideAnAbortedTransaction(*held.context);
+	RefuseInsideAnAbortedTransaction(*held.context, connection->con.Sharing());
 	auto requested = ListedNames(columns);
 	auto keyed = ListedNames(key);
 	RefuseClosed(*connection);
@@ -389,7 +389,7 @@ std::unique_ptr<DuckDBPyAppender> DuckDBPyAppender::ForTable(std::shared_ptr<Duc
 	{
 		DUCKDB_PY_ASSERT_GIL_HELD();
 		nb::gil_scoped_release release;
-		engine::ConnectionClaim claim(*held.context);
+		engine::ConnectionClaim claim(*held.context, connection->con.Sharing());
 		resolved = ResolveTable(*held.context, table);
 	}
 	vector<reference<const ColumnDefinition>> key_columns;
@@ -418,7 +418,7 @@ std::unique_ptr<DuckDBPyAppender> DuckDBPyAppender::ForQuery(std::shared_ptr<Duc
                                                              const string &dml, const nb::dict &columns,
                                                              const std::optional<string> &source) {
 	Held held {connection->con.ShareDatabase(), connection->con.GetConnection().context};
-	RefuseInsideAnAbortedTransaction(*held.context);
+	RefuseInsideAnAbortedTransaction(*held.context, connection->con.Sharing());
 	// Converting a name or a type can run Python code that changes the dict, so both passes read one copy of it
 	vector<std::pair<nb::object, nb::object>> declared;
 	for (auto item : columns) {
@@ -564,7 +564,7 @@ void DuckDBPyAppender::Flush() {
 	if (buffer->Count() == 0) {
 		return;
 	}
-	engine::Session session(held.context);
+	engine::Session session(held.context, connection->con.Sharing());
 	bool signalled = false;
 	auto check = [&signalled]() {
 		try {

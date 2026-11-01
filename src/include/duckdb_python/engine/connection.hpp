@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb_python/engine/result.hpp"
+#include "duckdb_python/shared_connection.hpp"
 
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
@@ -59,7 +60,7 @@ bool OnExitThread();
 
 //! Client state kept on the engine's connection. It never owns a result: a result holds the context, and
 //! the context holds this state.
-class ConnectionState : public ClientContextState {
+class ConnectionState : public SharedConnectionScanState {
 public:
 	static shared_ptr<ConnectionState> Get(ClientContext &context);
 
@@ -75,12 +76,12 @@ public:
 	//! Between the two calls, every table the client's replacement scan resolves is recorded
 	void BeginResolving();
 	ResolvedTables EndResolving();
-	void RecordResolved(const string &name, TableRef &table);
+	void RecordResolved(const string &name, TableRef &table) override;
 	//! While pinned, the replacement scan answers a recorded name with the recorded table; an exclusive pin answers
 	//! no other name
 	void Pin(optional_ptr<const ResolvedTables> tables, bool exclusive = false);
-	unique_ptr<TableRef> RecallResolved(const string &name);
-	bool PinnedExclusively();
+	unique_ptr<TableRef> RecallResolved(const string &name) override;
+	bool PinnedExclusively() override;
 
 	//! Whether the exit thread made the latest claim, after the exit hook
 	bool AdmittedDuringExit() const {
@@ -172,8 +173,9 @@ private:
 //! connection's queries, is refused instead of waiting: the work it would wait for may be waiting for it.
 class ConnectionClaim {
 public:
-	ConnectionClaim(ConnectionState &state, const ClientContext &context);
-	explicit ConnectionClaim(ClientContext &context);
+	ConnectionClaim(ConnectionState &state, const ClientContext &context,
+	                std::shared_ptr<SharedConnection> shared = nullptr);
+	explicit ConnectionClaim(ClientContext &context, std::shared_ptr<SharedConnection> shared = nullptr);
 	~ConnectionClaim();
 
 	ConnectionClaim(const ConnectionClaim &) = delete;
@@ -181,6 +183,7 @@ public:
 
 private:
 	ConnectionState &state;
+	std::shared_ptr<SharedConnection> shared;
 };
 
 //! The engine's check that no result holds the connection, with its refusal named as ConnectionState::NameRefusal does
@@ -198,7 +201,7 @@ struct Prepared {
 //! The statements, prepared statements and results of one engine connection
 class Session {
 public:
-	explicit Session(shared_ptr<ClientContext> context);
+	explicit Session(shared_ptr<ClientContext> context, std::shared_ptr<SharedConnection> shared = nullptr);
 
 public:
 	ClientContext &Context() const {
@@ -230,6 +233,7 @@ public:
 
 private:
 	shared_ptr<ClientContext> context;
+	std::shared_ptr<SharedConnection> shared;
 	shared_ptr<ConnectionState> state;
 	//! Counts the statements submitted here, which is where every statement of the client passes
 	shared_ptr<SourceRegistry> registry;

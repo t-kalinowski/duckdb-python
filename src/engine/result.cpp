@@ -79,8 +79,9 @@ void Complete(QueryResult &result, const InterruptCheck &check) {
 	}
 }
 
-Result::Result(unique_ptr<QueryResult> submitted, StatementType written_type, Format format_p)
-    : handle(std::move(submitted)), format(std::move(format_p)), state(State::PENDING) {
+Result::Result(unique_ptr<QueryResult> submitted, StatementType written_type, Format format_p,
+               std::shared_ptr<SharedConnection> shared_p)
+    : handle(std::move(submitted)), shared(std::move(shared_p)), format(std::move(format_p)), state(State::PENDING) {
 	if (!handle) {
 		throw InternalException("engine::Result created without a query result");
 	}
@@ -263,7 +264,7 @@ unique_ptr<ConnectionClaim> Result::ClaimWhileRunning() {
 	if (state != State::PENDING && state != State::STREAMING) {
 		return nullptr;
 	}
-	return make_uniq<ConnectionClaim>(*connection_state, *TryGetContext());
+	return make_uniq<ConnectionClaim>(*connection_state, *TryGetContext(), shared);
 }
 
 void Result::RetainClaimed(const InterruptCheck &check) {
@@ -450,7 +451,7 @@ void Result::CopyArrowSchema(ArrowSchema &out) const {
 void Result::BuildArrowSchema(const vector<string> &schema_names, ArrowSchema &out) const {
 	auto context = TryGetContext();
 	auto properties = client_properties;
-	ConnectionClaim claim(*connection_state, *context);
+	ConnectionClaim claim(*connection_state, *context, shared);
 	context->RunFunctionInTransaction(
 	    [&]() { ArrowConverter::ToArrowSchema(&out, Types(), schema_names, properties); });
 }

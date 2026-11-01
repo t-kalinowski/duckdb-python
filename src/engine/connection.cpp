@@ -17,7 +17,7 @@ namespace duckdb {
 namespace engine {
 
 shared_ptr<ConnectionState> ConnectionState::Get(ClientContext &context) {
-	return context.registered_state->GetOrCreate<ConnectionState>("python_connection_state");
+	return context.registered_state->GetOrCreate<ConnectionState>(SharedConnectionScanState::Key());
 }
 
 static constexpr const char *BUSY_ERROR =
@@ -65,22 +65,36 @@ bool CallbackScope::Inside(const ClientContext &context) {
 	return false;
 }
 
-ConnectionClaim::ConnectionClaim(ConnectionState &state_p, const ClientContext &context) : state(state_p) {
+ConnectionClaim::ConnectionClaim(ConnectionState &state_p, const ClientContext &context,
+                                 std::shared_ptr<SharedConnection> shared_p)
+    : state(state_p), shared(std::move(shared_p)) {
 	if (CallbackScope::Inside(context)) {
 		throw ResourceInUseException(CALLBACK_ERROR);
 	}
 	if (state.busy.exchange(true)) {
 		throw ResourceInUseException(BUSY_ERROR);
 	}
+	try {
+		if (shared) {
+			shared->Begin();
+		}
+	} catch (...) {
+		state.busy = false;
+		throw;
+	}
 	if (Exiting()) {
 		state.admitted_during_exit = OnExitThread();
 	}
 }
 
-ConnectionClaim::ConnectionClaim(ClientContext &context) : ConnectionClaim(*ConnectionState::Get(context), context) {
+ConnectionClaim::ConnectionClaim(ClientContext &context, std::shared_ptr<SharedConnection> shared)
+    : ConnectionClaim(*ConnectionState::Get(context), context, std::move(shared)) {
 }
 
 ConnectionClaim::~ConnectionClaim() {
+	if (shared) {
+		shared->End();
+	}
 	state.busy = false;
 }
 
@@ -317,12 +331,13 @@ static void NameRefusal(ConnectionState &state, QueryResult &handle) {
 	}
 }
 
-Session::Session(shared_ptr<ClientContext> context_p)
-    : context(std::move(context_p)), state(ConnectionState::Get(*context)), registry(SourceRegistry::Get(*context)) {
+Session::Session(shared_ptr<ClientContext> context_p, std::shared_ptr<SharedConnection> shared_p)
+    : context(std::move(context_p)), shared(std::move(shared_p)), state(ConnectionState::Get(*context)),
+      registry(SourceRegistry::Get(*context)) {
 }
 
 Prepared Session::Prepare(unique_ptr<SQLStatement> statement) {
-	ConnectionClaim claim(*state, *context);
+	ConnectionClaim claim(*state, *context, shared);
 	Prepared prepared;
 	{
 		ResolvingGuard guard(*state);
@@ -337,7 +352,7 @@ Prepared Session::Prepare(unique_ptr<SQLStatement> statement) {
 }
 
 ConnectionClaim Session::Claim() {
-	return ConnectionClaim(*state, *context);
+	return ConnectionClaim(*state, *context, shared);
 }
 
 shared_ptr<Result> Session::Submit(unique_ptr<SQLStatement> statement, identifier_map_t<BoundParameterData> &values,
@@ -352,14 +367,14 @@ shared_ptr<Result> Session::SubmitClaimed(unique_ptr<SQLStatement> statement,
 	registry->CountStatement(written_type);
 	auto handle = context->Submit(std::move(statement), values, QueryParameters(format.EngineFormat()));
 	NameRefusal(*state, *handle);
-	auto result = make_shared_ptr<Result>(std::move(handle), written_type, format);
+	auto result = make_shared_ptr<Result>(std::move(handle), written_type, format, shared);
 	Result::Register(result);
 	return result;
 }
 
 shared_ptr<Result> Session::Submit(Prepared &prepared, identifier_map_t<BoundParameterData> &values,
                                    const Format &format) {
-	ConnectionClaim claim(*state, *context);
+	ConnectionClaim claim(*state, *context, shared);
 	registry->CountStatement(prepared.statement->GetStatementType());
 	unique_ptr<QueryResult> handle;
 	{
@@ -367,7 +382,7 @@ shared_ptr<Result> Session::Submit(Prepared &prepared, identifier_map_t<BoundPar
 		handle = prepared.statement->Submit(values, QueryParameters(format.EngineFormat()));
 	}
 	NameRefusal(*state, *handle);
-	auto result = make_shared_ptr<Result>(std::move(handle), prepared.statement->GetStatementType(), format);
+	auto result = make_shared_ptr<Result>(std::move(handle), prepared.statement->GetStatementType(), format, shared);
 	Result::Register(result);
 	return result;
 }
@@ -390,7 +405,7 @@ shared_ptr<Result> Session::Submit(unique_ptr<ColumnDataCollection> collection, 
 }
 
 StatementSignature Session::Bind(unique_ptr<SQLStatement> statement, ResolvedTables &tables) {
-	ConnectionClaim claim(*state, *context);
+	ConnectionClaim claim(*state, *context, shared);
 	ResolvingGuard guard(*state);
 	auto signature = context->BindStatement(std::move(statement));
 	tables = guard.End();
@@ -399,7 +414,7 @@ StatementSignature Session::Bind(unique_ptr<SQLStatement> statement, ResolvedTab
 
 StatementSignature Session::Bind(unique_ptr<SQLStatement> statement, ResolvedTables &tables,
                                  const identifier_map_t<BoundParameterData> &values) {
-	ConnectionClaim claim(*state, *context);
+	ConnectionClaim claim(*state, *context, shared);
 	ResolvingGuard guard(*state);
 	StatementSignature signature;
 	ErrorData bind_error;
@@ -439,7 +454,7 @@ StatementSignature Session::Bind(unique_ptr<SQLStatement> statement, ResolvedTab
 }
 
 void Session::Run(unique_ptr<SQLStatement> statement, const InterruptCheck &check) {
-	ConnectionClaim claim(*state, *context);
+	ConnectionClaim claim(*state, *context, shared);
 	RunClaimed(std::move(statement), check);
 }
 
@@ -451,7 +466,7 @@ void Session::RunClaimed(unique_ptr<SQLStatement> statement, const InterruptChec
 }
 
 void Session::Run(unique_ptr<SQLStatement> statement, const ResolvedTables &tables, const InterruptCheck &check) {
-	ConnectionClaim claim(*state, *context);
+	ConnectionClaim claim(*state, *context, shared);
 	registry->CountStatement(statement->type);
 	unique_ptr<QueryResult> handle;
 	{

@@ -766,6 +766,10 @@ NB_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 
 	RegisterExceptions(m);
 
+	m.def("from_shared_connection", &DuckDBPyConnection::FromSharedConnection,
+	      "Import a trusted native connection export with a compatible DuckDB ABI. The producer retains ownership; "
+	      "close() closes the shared session, while garbage collection releases only this view.",
+	      nb::arg("exported"));
 	m.def("connect", &DuckDBPyConnection::Connect,
 	      "Create a DuckDB database instance. Can take a database file name to read/write persistent data and a "
 	      "read_only flag if no changes are desired",

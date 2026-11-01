@@ -776,7 +776,7 @@ std::shared_ptr<SourceHandle> DuckDBPySeam::RegisterSource(DuckDBPyConnection &s
 	unique_ptr<TableRef> table;
 	{
 		// Classifying and adapting the object runs its own Python, which must not close or use this connection
-		engine::ConnectionClaim claim(context);
+		engine::ConnectionClaim claim(context, self.con.Sharing());
 		table = PythonReplacementScan::ReplacementObject(obj, subject.empty() ? "source" : subject, context, kind);
 	}
 	auto handle = RegisterTable(context, std::move(table), subject);
@@ -1020,7 +1020,7 @@ static string ResultToBox(DuckDBPyResult &result, const std::optional<idx_t> &ma
 	// can run Python; the claim is taken under the GIL, which deadlocks nothing since a claim refuses instead of
 	// waiting. The rows are already in the client, so no engine task runs here.
 	auto context = use->TryGetContext();
-	engine::ConnectionClaim claim(*context);
+	engine::ConnectionClaim claim(*context, use->Sharing());
 	ClientBoxRendererContext box_context(*context);
 	return use->ToBox(box_context, config);
 }
