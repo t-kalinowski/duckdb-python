@@ -71,8 +71,12 @@ ConnectionClaim::ConnectionClaim(ConnectionState &state_p, const ClientContext &
 	if (CallbackScope::Inside(context)) {
 		throw ResourceInUseException(CALLBACK_ERROR);
 	}
-	if (state.busy.exchange(true)) {
-		throw ResourceInUseException(BUSY_ERROR);
+	{
+		lock_guard<mutex> guard(state.lock);
+		state.CheckThreadLocked();
+		if (state.busy.exchange(true)) {
+			throw ResourceInUseException(BUSY_ERROR);
+		}
 	}
 	try {
 		if (shared) {
@@ -98,7 +102,28 @@ ConnectionClaim::~ConnectionClaim() {
 	state.busy = false;
 }
 
+void ConnectionState::CheckThreadLocked() const {
+	if (owner_thread != std::thread::id() && owner_thread != std::this_thread::get_id()) {
+		throw ConnectionException("Exported connection must be used on its exporting thread");
+	}
+}
+
+void ConnectionState::CheckThread() const {
+	lock_guard<mutex> guard(lock);
+	CheckThreadLocked();
+}
+
+void ConnectionState::ConfineToCurrentThread() {
+	lock_guard<mutex> guard(lock);
+	CheckThreadLocked();
+	if (busy) {
+		throw ResourceInUseException(BUSY_ERROR);
+	}
+	owner_thread = std::this_thread::get_id();
+}
+
 void ConnectionState::ThrowIfBusy(const ClientContext &context) const {
+	CheckThread();
 	if (CallbackScope::Inside(context)) {
 		throw ResourceInUseException(CALLBACK_ERROR);
 	}

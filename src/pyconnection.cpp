@@ -1159,6 +1159,7 @@ void DuckDBPyConnection::Abort() {
 
 void DuckDBPyConnection::Close() {
 	ConnectionLockGuard conn_lock(*this);
+	CloseSharedConnectionExports(*this);
 	con.SetResult(nullptr);
 	DUCKDB_PY_ASSERT_GIL_HELD();
 	// Released with the GIL held, since the registry entries they let go own Python references
@@ -1592,6 +1593,9 @@ void InstantiateNewInstance(DuckDB &db) {
 
 std::shared_ptr<DuckDBPyConnection> DuckDBPyConnection::FromSharedConnection(const nb::dict &exported) {
 	auto shared = SharedConnection::Import(exported);
+	if (auto original = shared->OriginalPythonConnection()) {
+		return original;
+	}
 	auto &database = shared->GetDatabase();
 	auto &config = DBConfig::GetConfig(*database.instance);
 	bool python_ready = false;

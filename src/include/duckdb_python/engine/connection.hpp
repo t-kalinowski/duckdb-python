@@ -65,6 +65,9 @@ public:
 	static shared_ptr<ConnectionState> Get(ClientContext &context);
 
 public:
+	//! Exported sessions remain on their exporting thread, including after an export is released.
+	void ConfineToCurrentThread();
+	void CheckThread() const;
 	//! Throws the refusal a claim would get, without claiming
 	void ThrowIfBusy(const ClientContext &context) const;
 	//! The result of the DB-API's execute(). Only the DB-API can end it, so a refusal it causes says how.
@@ -90,10 +93,12 @@ public:
 
 private:
 	friend class ConnectionClaim;
+	void CheckThreadLocked() const;
 
+	std::thread::id owner_thread;
 	atomic<bool> admitted_during_exit {false};
 	atomic<bool> busy {false};
-	mutex lock;
+	mutable mutex lock;
 	weak_ptr<Result> dbapi_result;
 	//! Both belong to the thread binding the statement, so another thread's bind on the context does not see them
 	unique_ptr<ResolvedTables> resolving;

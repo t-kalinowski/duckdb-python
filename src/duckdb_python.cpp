@@ -766,6 +766,10 @@ NB_MODULE(DUCKDB_PYTHON_LIB_NAME, m) { // NOLINT
 
 	RegisterExceptions(m);
 
+	m.def("export_connection", &ExportSharedConnection,
+	      "Export a native DuckDB session for a compatible binding in this process. The returned owner keeps "
+	      "the connection alive; explicit close invalidates every imported view.",
+	      nb::arg("connection"));
 	m.def("from_shared_connection", &DuckDBPyConnection::FromSharedConnection,
 	      "Import a trusted native connection export with a compatible DuckDB ABI. The producer retains ownership; "
 	      "close() closes the shared session, while garbage collection releases only this view.",

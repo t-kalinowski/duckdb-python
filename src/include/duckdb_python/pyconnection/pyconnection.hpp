@@ -222,7 +222,7 @@ public:
 		connection = &shared->GetConnection();
 		state = engine::ConnectionState::Get(*connection->context);
 		sources = engine::SourceRegistry::Get(*connection->context);
-		database = shared_ptr<DuckDB>(std::shared_ptr<DuckDB>(shared, &shared->GetDatabase()));
+		database = make_shared_ptr<DuckDB>(*shared->GetDatabase().instance);
 		shared_connection = std::move(shared);
 	}
 	const std::shared_ptr<SharedConnection> &Sharing() const {
@@ -268,6 +268,9 @@ public:
 
 private:
 	void CheckShared() const {
+		if (state) {
+			state->CheckThread();
+		}
 		if (shared_connection) {
 			shared_connection->Check();
 		}
@@ -328,6 +331,7 @@ public:
 	};
 
 	ConnectionGuard con;
+	std::weak_ptr<PythonConnectionExport> shared_export;
 	Cursors cursors;
 	// Recursive so that the outer lock taken at the top of execute/fetch
 	// methods (while still holding the GIL) does not deadlock against the

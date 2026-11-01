@@ -14,6 +14,10 @@ class Connection;
 class DuckDB;
 class ClientContext;
 class DuckDBPyConnection;
+class PythonConnectionExport;
+
+nb::dict ExportSharedConnection(const std::shared_ptr<DuckDBPyConnection> &connection);
+void CloseSharedConnectionExports(DuckDBPyConnection &connection);
 
 //! A producer-owned native session. The Python owner keeps the export alive;
 //! only the producer closes or destroys the underlying connection.
@@ -30,6 +34,8 @@ public:
 	void End();
 	void Close();
 	void Track(const std::shared_ptr<DuckDBPyConnection> &connection);
+	nb::dict Export() const;
+	std::shared_ptr<DuckDBPyConnection> OriginalPythonConnection() const;
 
 private:
 	SharedConnection(const duckdb_shared_connection &api, nb::object owner);
@@ -37,6 +43,7 @@ private:
 	void CheckThread() const;
 
 	duckdb_shared_connection api;
+	const duckdb_shared_connection *descriptor;
 	PyObjectHolder owner;
 	std::thread::id thread;
 	std::weak_ptr<SharedConnection> self;
